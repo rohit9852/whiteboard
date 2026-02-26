@@ -119,3 +119,12 @@ export interface ViewTransform {
   offsetX: number;
   offsetY: number;
 }
+
+export interface WhiteboardPageState {
+  id: string;
+  name: string;
+  elements: WhiteboardElement[];
+  history: WhiteboardElement[][];
+  historyIndex: number;
+  viewTransform: ViewTransform;
+}

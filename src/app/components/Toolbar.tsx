@@ -209,7 +209,7 @@ export default function Toolbar({
             </div>
 
             {/* Keyboard hint */}
-            <div style={styles.hint}>Space + drag to pan · Scroll to zoom</div>
+            <div style={styles.hint}>Scroll to pan · Ctrl+Scroll to zoom · Draw near edge to auto-scroll</div>
         </div>
     );
 }

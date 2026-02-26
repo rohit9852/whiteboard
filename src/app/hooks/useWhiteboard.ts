@@ -8,29 +8,75 @@ import {
     Point,
     RectangleElement,
     StrokeElement,
+    StickyElement,
     TextElement,
     Tool,
     ViewTransform,
     WhiteboardElement,
+    WhiteboardPageState,
 } from '../types';
 
 const generateId = () => Math.random().toString(36).slice(2, 10);
 
-export function useWhiteboard() {
+// Distance from point (px, py) to line segment (x1,y1)-(x2,y2)
+function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy) || 1e-6;
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (len * len)));
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    return Math.hypot(px - projX, py - projY);
+}
+
+// True if point (px, py) is inside rect (x,y,w,h) or within padding
+function pointInRect(px: number, py: number, x: number, y: number, w: number, h: number, padding: number): boolean {
+    return px >= x - padding && px <= x + w + padding && py >= y - padding && py <= y + h + padding;
+}
+
+const defaultViewTransform: ViewTransform = {
+    scale: 1,
+    offsetX: 0,
+    offsetY: 0,
+};
+
+// Auto-pan (vertical/horizontal scroll) when drawing near viewport edge so page never "fills"
+const EDGE_MARGIN = 80;
+const AUTO_PAN_SPEED = 10;
+
+export interface UseWhiteboardOptions {
+    initialPageState?: WhiteboardPageState | null;
+    onStateChange?: (state: Omit<WhiteboardPageState, 'id' | 'name'>) => void;
+}
+
+export function useWhiteboard(options?: UseWhiteboardOptions) {
+    const { initialPageState, onStateChange } = options ?? {};
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [elements, setElements] = useState<WhiteboardElement[]>([]);
-    const [history, setHistory] = useState<WhiteboardElement[][]>([[]]);
-    const [historyIndex, setHistoryIndex] = useState(0);
+    const [elements, setElements] = useState<WhiteboardElement[]>(
+        initialPageState?.elements ?? []
+    );
+    const [history, setHistory] = useState<WhiteboardElement[][]>(
+        initialPageState?.history ?? [[]]
+    );
+    const [historyIndex, setHistoryIndex] = useState(
+        initialPageState?.historyIndex ?? 0
+    );
     const [tool, setTool] = useState<Tool>('pen');
     const [color, setColor] = useState('#f8fafc');
     const [strokeWidth, setStrokeWidth] = useState(3);
     const [fillShape, setFillShape] = useState(false);
     const [fontSize, setFontSize] = useState(20);
-    const [viewTransform, setViewTransform] = useState<ViewTransform>({
-        scale: 1,
-        offsetX: 0,
-        offsetY: 0,
-    });
+    const [viewTransform, setViewTransform] = useState<ViewTransform>(
+        initialPageState?.viewTransform ?? defaultViewTransform
+    );
+
+    // Inline text input on canvas (click to type instead of prompt)
+    const [textInputState, setTextInputState] = useState<{
+        worldX: number;
+        worldY: number;
+        screenX: number;
+        screenY: number;
+    } | null>(null);
 
     const isDrawingRef = useRef(false);
     const isPanningRef = useRef(false);
@@ -86,6 +132,35 @@ export function useWhiteboard() {
         setElements(empty);
         pushHistory(empty);
     }, [pushHistory]);
+
+    const submitTextInput = useCallback(
+        (text: string) => {
+            setTextInputState((state) => {
+                if (!state || !text.trim()) return null;
+                const newEl: WhiteboardElement = {
+                    id: generateId(),
+                    type: 'text',
+                    x: state.worldX,
+                    y: state.worldY,
+                    text: text.trim(),
+                    color,
+                    fontSize,
+                    opacity: 1,
+                };
+                setElements((prev) => {
+                    const updated = [...prev, newEl];
+                    pushHistory(updated);
+                    return updated;
+                });
+                return null;
+            });
+        },
+        [color, fontSize, pushHistory]
+    );
+
+    const cancelTextInput = useCallback(() => {
+        setTextInputState(null);
+    }, []);
 
     const exportPNG = useCallback(() => {
         const canvas = canvasRef.current;
@@ -255,6 +330,32 @@ export function useWhiteboard() {
         render();
     }, [render]);
 
+    // Sync from initial state only when page id changes (switching pages)
+    const prevPageIdRef = useRef<string | undefined>(undefined);
+    useEffect(() => {
+        if (!initialPageState) return;
+        const pageId = initialPageState.id;
+        if (pageId !== prevPageIdRef.current) {
+            prevPageIdRef.current = pageId;
+            setElements(initialPageState.elements);
+            setHistory(initialPageState.history);
+            setHistoryIndex(initialPageState.historyIndex);
+            setViewTransform(initialPageState.viewTransform);
+        }
+    }, [initialPageState?.id, initialPageState]);
+
+    // Notify parent when page state changes (for multi-page persistence)
+    const onStateChangeRef = useRef(onStateChange);
+    onStateChangeRef.current = onStateChange;
+    useEffect(() => {
+        onStateChangeRef.current?.({
+            elements,
+            history,
+            historyIndex,
+            viewTransform,
+        });
+    }, [elements, history, historyIndex, viewTransform]);
+
     // Canvas resize
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -370,22 +471,12 @@ export function useWhiteboard() {
                     opacity: 1,
                 } as ArrowElement;
             } else if (tool === 'text') {
-                const text = window.prompt('Enter text:');
-                if (text) {
-                    const newEl: WhiteboardElement = {
-                        id: generateId(),
-                        type: 'text',
-                        x: wp.x,
-                        y: wp.y,
-                        text,
-                        color,
-                        fontSize,
-                        opacity: 1,
-                    };
-                    const updated = [...elements, newEl];
-                    setElements(updated);
-                    pushHistory(updated);
-                }
+                setTextInputState({
+                    worldX: wp.x,
+                    worldY: wp.y,
+                    screenX: e.clientX,
+                    screenY: e.clientY,
+                });
                 isDrawingRef.current = false;
                 return;
             } else if (tool === 'sticky') {
@@ -425,25 +516,60 @@ export function useWhiteboard() {
                 }));
                 return;
             }
-            if (!isDrawingRef.current || !currentElementRef.current) return;
 
             const wp = screenToWorld(e.clientX, e.clientY, viewTransform);
 
-            if (tool === 'eraser') {
-                const eraseRadius = strokeWidth * 8;
-                setElements((prev) =>
-                    prev.filter((el) => {
+            // Eraser: run when drawing with eraser tool (no currentElementRef needed)
+            if (tool === 'eraser' && isDrawingRef.current) {
+                const eraseRadius = (strokeWidth * 12) / viewTransform.scale;
+                setElements((prev) => {
+                    const next = prev.filter((el) => {
                         if (el.type === 'stroke') {
-                            return !el.points.some(
-                                (p) =>
-                                    Math.hypot(p.x - wp.x, p.y - wp.y) < eraseRadius / viewTransform.scale
+                            return !(el as StrokeElement).points.some(
+                                (p) => Math.hypot(p.x - wp.x, p.y - wp.y) < eraseRadius
                             );
                         }
+                        if (el.type === 'rectangle') {
+                            const r = el as RectangleElement;
+                            const cx = r.x + r.width / 2;
+                            const cy = r.y + r.height / 2;
+                            const halfW = r.width / 2 + eraseRadius;
+                            const halfH = r.height / 2 + eraseRadius;
+                            return Math.abs(wp.x - cx) > halfW || Math.abs(wp.y - cy) > halfH;
+                        }
+                        if (el.type === 'circle') {
+                            const c = el as CircleElement;
+                            const rx = Math.abs(c.rx) + eraseRadius;
+                            const ry = Math.abs(c.ry) + eraseRadius;
+                            const dx = (wp.x - c.cx) / rx;
+                            const dy = (wp.y - c.cy) / ry;
+                            return dx * dx + dy * dy > 1; // keep if outside expanded ellipse
+                        }
+                        if (el.type === 'line' || el.type === 'arrow') {
+                            const l = el as LineElement;
+                            const d = distToSegment(wp.x, wp.y, l.x1, l.y1, l.x2, l.y2);
+                            return d > eraseRadius;
+                        }
+                        if (el.type === 'text') {
+                            const t = el as TextElement;
+                            const approxW = t.text.length * t.fontSize * 0.6;
+                            const approxH = t.fontSize * 1.4;
+                            return !pointInRect(wp.x, wp.y, t.x, t.y, approxW, approxH, eraseRadius);
+                        }
+                        if (el.type === 'sticky') {
+                            const s = el as StickyElement;
+                            return !pointInRect(wp.x, wp.y, s.x, s.y, s.width, s.height, eraseRadius);
+                        }
                         return true;
-                    })
-                );
+                    });
+                    if (next.length !== prev.length) pushHistory(next);
+                    return next;
+                });
+                render();
                 return;
             }
+
+            if (!isDrawingRef.current || !currentElementRef.current) return;
 
             const el = currentElementRef.current;
             const sp = startPointRef.current;
@@ -467,9 +593,28 @@ export function useWhiteboard() {
                 (el as LineElement).y2 = wp.y;
             }
 
+            // Auto vertical/horizontal scroll when drawing near viewport edge (page never "full")
+            const clientX = e.clientX;
+            const clientY = e.clientY;
+            let dOffsetX = 0;
+            let dOffsetY = 0;
+            if (typeof window !== 'undefined') {
+                if (clientY > window.innerHeight - EDGE_MARGIN) dOffsetY = AUTO_PAN_SPEED;
+                else if (clientY < EDGE_MARGIN) dOffsetY = -AUTO_PAN_SPEED;
+                if (clientX > window.innerWidth - EDGE_MARGIN) dOffsetX = AUTO_PAN_SPEED;
+                else if (clientX < EDGE_MARGIN) dOffsetX = -AUTO_PAN_SPEED;
+            }
+            if (dOffsetX !== 0 || dOffsetY !== 0) {
+                setViewTransform((vt) => ({
+                    ...vt,
+                    offsetX: vt.offsetX + dOffsetX,
+                    offsetY: vt.offsetY + dOffsetY,
+                }));
+            }
+
             render();
         },
-        [tool, strokeWidth, viewTransform, screenToWorld, render]
+        [tool, strokeWidth, viewTransform, screenToWorld, render, pushHistory]
     );
 
     const onMouseUp = useCallback(() => {
@@ -478,7 +623,7 @@ export function useWhiteboard() {
             return;
         }
         if (!isDrawingRef.current) return;
-        isDrawingRef.current = false;
+        isDrawingRef.current = false; // clear for both normal draw and eraser
 
         if (currentElementRef.current) {
             const el = currentElementRef.current;
@@ -500,17 +645,28 @@ export function useWhiteboard() {
 
     const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
         e.preventDefault();
-        const ZOOM_FACTOR = 0.001;
-        const delta = -e.deltaY * ZOOM_FACTOR;
-        setViewTransform((vt) => {
-            const newScale = Math.min(10, Math.max(0.05, vt.scale * (1 + delta)));
-            const ratio = newScale / vt.scale;
-            return {
-                scale: newScale,
-                offsetX: e.clientX - ratio * (e.clientX - vt.offsetX),
-                offsetY: e.clientY - ratio * (e.clientY - vt.offsetY),
-            };
-        });
+        // Ctrl/Cmd + scroll = zoom; plain scroll = vertical/horizontal pan
+        if (e.ctrlKey || e.metaKey) {
+            const ZOOM_FACTOR = 0.001;
+            const delta = -e.deltaY * ZOOM_FACTOR;
+            setViewTransform((vt) => {
+                const newScale = Math.min(10, Math.max(0.05, vt.scale * (1 + delta)));
+                const ratio = newScale / vt.scale;
+                return {
+                    scale: newScale,
+                    offsetX: e.clientX - ratio * (e.clientX - vt.offsetX),
+                    offsetY: e.clientY - ratio * (e.clientY - vt.offsetY),
+                };
+            });
+        } else {
+            // Vertical and horizontal scroll (pan)
+            const SCROLL_SPEED = 1.2;
+            setViewTransform((vt) => ({
+                ...vt,
+                offsetX: vt.offsetX - e.deltaX * SCROLL_SPEED,
+                offsetY: vt.offsetY - e.deltaY * SCROLL_SPEED,
+            }));
+        }
     }, []);
 
     return {
@@ -537,5 +693,8 @@ export function useWhiteboard() {
         onWheel,
         canUndo: historyIndex > 0,
         canRedo: historyIndex < history.length - 1,
+        textInputState,
+        submitTextInput,
+        cancelTextInput,
     };
 }

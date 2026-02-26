@@ -1,12 +1,14 @@
 'use client';
 
-import { useWhiteboard } from './hooks/useWhiteboard';
+import { useWhiteboardPages } from './hooks/useWhiteboardPages';
 import Toolbar from './components/Toolbar';
 import WhiteboardCanvas from './components/WhiteboardCanvas';
 import StickyOverlay from './components/StickyOverlay';
+import PageTabs from './components/PageTabs';
+import InlineTextInput from './components/InlineTextInput';
 
 export default function Home() {
-  const hook = useWhiteboard();
+  const hook = useWhiteboardPages();
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#1a1a2e', overflow: 'hidden' }}>
@@ -15,6 +17,27 @@ export default function Home() {
 
       {/* Sticky note DOM overlay */}
       <StickyOverlay elements={hook.elements} viewTransform={hook.viewTransform} />
+
+      {/* Inline text input when Text tool is used (click to type on canvas) */}
+      {hook.textInputState && (
+        <InlineTextInput
+          screenX={hook.textInputState.screenX}
+          screenY={hook.textInputState.screenY}
+          color={hook.color}
+          fontSize={hook.fontSize}
+          onSubmit={hook.submitTextInput}
+          onCancel={hook.cancelTextInput}
+        />
+      )}
+
+      {/* Page tabs */}
+      <PageTabs
+        pages={hook.pages}
+        currentPageIndex={hook.currentPageIndex}
+        onSelectPage={hook.setCurrentPageIndex}
+        onAddPage={hook.addPage}
+        onRemovePage={hook.removePage}
+      />
 
       {/* Toolbar */}
       <Toolbar
@@ -69,6 +92,10 @@ export default function Home() {
           fontWeight: 600,
         }}>
           {hook.tool}
+        </span>
+        <span style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.08)' }} />
+        <span style={{ fontSize: 12, color: 'rgba(148,163,184,0.6)' }}>
+          {hook.currentPage?.name ?? 'Page'} ({hook.currentPageIndex + 1}/{hook.pages.length})
         </span>
       </div>
     </div>
